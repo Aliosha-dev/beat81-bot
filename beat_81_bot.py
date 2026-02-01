@@ -1,99 +1,112 @@
 import requests
 import datetime
 import pytz
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import json
 import os
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
-# === REQUIRED ENVIRONMENT VARIABLES ===
-# BEARER_TOKEN - Your Beat81 API bearer token
-# USER_ID - Your Beat81 user ID
-# LOCATION_ID_SENDLING - Sendling location ID
-# EMAIL_RECIPIENT - Email address for notifications
-# EMAIL_PASSWORD - Email password for sending notifications
-
-# === KONFIGURATION ===
-BEARER_TOKEN = os.getenv('BEARER_TOKEN')
-USER_ID = os.getenv('USER_ID')
-LOCATION_ID_SENDLING = os.getenv('LOCATION_ID_SENDLING')
+# === API CONFIGURATION ===
 BOOKING_API_URL = "https://api.gritspot.com/api/tickets"
 EVENTS_API_URL = "https://api.gritspot.com/api/events"
 
-# Target class configuration
-TARGET_TIME_HOUR = 7
-TARGET_TIME_MINUTE = 35
-TARGET_LOCATION_KEYWORD = "sendling"  # Will match location name containing this
-TARGET_CLASS_KEYWORD = "ride"  # RIDE = spinning/cycling class
-TARGET_DAYS = [0, 2, 4]  # Monday=0, Wednesday=2, Friday=4
-DAYS_IN_ADVANCE = 14  # Book 2 weeks in advance
-
-# Email configuration
-EMAIL_RECIPIENT = os.getenv('EMAIL_RECIPIENT')
-EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
-EMAIL_SUBJECT = "Beat81 Booking Status"
-
-HEADERS = {
-    "Authorization": f"Bearer {BEARER_TOKEN}",
-    "Accept": "application/json",
-    "Content-Type": "application/json",
-}
-
-# === FUNKTIONEN ===
-
-def send_email(subject, body, is_success=True):
-    try:
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_RECIPIENT
-        msg['To'] = EMAIL_RECIPIENT
-        msg['Subject'] = subject
-
-        # Add body
-        msg.attach(MIMEText(body, 'plain'))
-
-        # Connect to Gmail's SMTP server
-        server = smtplib.SMTP('smtp.gmail.com', 587)
-        server.starttls()
-        
-        # Login to your Gmail account
-        server.login(EMAIL_RECIPIENT, EMAIL_PASSWORD)
-        
-        # Send email
-        text = msg.as_string()
-        server.sendmail(EMAIL_RECIPIENT, EMAIL_RECIPIENT, text)
-        server.quit()
-        
-        print("✅ Email notification sent successfully")
-    except Exception as e:
-        print(f"❌ Failed to send email notification: {e}")
-
-def get_target_dates():
+# === USERS CONFIGURATION ===
+# Load users from JSON file or environment variable
+def load_users():
     """
-    Get all target dates (Mon/Wed/Fri) that are exactly 2 weeks from now.
+    Load user configurations from users.json file or USERS_CONFIG env variable.
+    Each user has their own bearer token, user_id, and booking preferences.
+    """
+    # Try to load from environment variable first (for GitHub Actions)
+    users_config = os.getenv('USERS_CONFIG')
+    if users_config:
+        try:
+            return json.loads(users_config)
+        except json.JSONDecodeError as e:
+            print(f"❌ Error parsing USERS_CONFIG: {e}")
+            return []
+
+    # Try to load from users.json file
+    config_path = os.path.join(os.path.dirname(__file__), 'users.json')
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"❌ Error loading users.json: {e}")
+            return []
+
+    # Fallback to single user from environment variables (backwards compatibility)
+    bearer_token = os.getenv('BEARER_TOKEN')
+    user_id = os.getenv('USER_ID')
+    if bearer_token and user_id:
+        return [{
+            "name": "Default User",
+            "bearer_token": bearer_token,
+            "user_id": user_id,
+            "bookings": [{
+                "location": "sendling",
+                "class_type": "ride",
+                "time": "07:35",
+                "days": ["monday", "wednesday", "friday"],
+                "days_in_advance": 14
+            }]
+        }]
+
+    return []
+
+
+def get_headers(bearer_token):
+    return {
+        "Authorization": f"Bearer {bearer_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+
+
+def parse_time(time_str):
+    """Parse time string like '07:35' into hour and minute."""
+    parts = time_str.split(':')
+    return int(parts[0]), int(parts[1])
+
+
+def parse_days(days_list):
+    """Convert day names to weekday numbers (Monday=0, Sunday=6)."""
+    day_map = {
+        'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+        'friday': 4, 'saturday': 5, 'sunday': 6,
+        'mon': 0, 'tue': 1, 'wed': 2, 'thu': 3, 'fri': 4, 'sat': 5, 'sun': 6
+    }
+    return [day_map[d.lower()] for d in days_list if d.lower() in day_map]
+
+
+def get_target_dates(target_days, days_in_advance, target_hour, target_minute):
+    """
+    Get all target dates for the specified days that are the specified days in advance.
     Returns a list of (start, end, date) tuples for each target day.
     """
     today = datetime.date.today()
     berlin = pytz.timezone("Europe/Berlin")
     target_dates = []
 
-    # Check the next 14 days for Mon/Wed/Fri
-    for days_ahead in range(DAYS_IN_ADVANCE, DAYS_IN_ADVANCE + 7):
+    # Check days from days_in_advance to days_in_advance + 7
+    for days_ahead in range(days_in_advance, days_in_advance + 7):
         target_date = today + datetime.timedelta(days=days_ahead)
-        if target_date.weekday() in TARGET_DAYS:  # Mon=0, Wed=2, Fri=4
-            # Create time range around target time (6:00 to 9:00 to catch the 07:35 class)
-            start = berlin.localize(datetime.datetime.combine(target_date, datetime.time(6, 0))).isoformat()
-            end = berlin.localize(datetime.datetime.combine(target_date, datetime.time(9, 0))).isoformat()
+        if target_date.weekday() in target_days:
+            # Create time range around target time (2 hours before to 2 hours after)
+            start_hour = max(0, target_hour - 2)
+            end_hour = min(23, target_hour + 2)
+            start = berlin.localize(datetime.datetime.combine(target_date, datetime.time(start_hour, 0))).isoformat()
+            end = berlin.localize(datetime.datetime.combine(target_date, datetime.time(end_hour, 59))).isoformat()
             target_dates.append((start, end, target_date))
 
     return target_dates
 
-def fetch_events(start, end):
-    # Using the same params structure as the mobile app API calls
+
+def fetch_events(start, end, headers):
+    """Fetch events from the API for the given time range."""
     params = {
         "$sort[date_begin]": 1,
         "date_begin_gte": start,
@@ -110,47 +123,21 @@ def fetch_events(start, end):
         "$limit": 50
     }
 
-    print("\n=== API Request ===")
-    print(f"URL: {EVENTS_API_URL}")
-    print(f"Searching for events: {start.split('T')[0]}")
-
     try:
-        response = requests.get(EVENTS_API_URL, headers=HEADERS, params=params)
+        response = requests.get(EVENTS_API_URL, headers=headers, params=params)
         response.raise_for_status()
         data = response.json()
-
-        print("\n=== API Response Summary ===")
-        events = data.get('data', [])
-        print(f"Total events found: {len(events)}")
-        print("\n=== Event Details ===")
-        for event in events:
-            location_name = "Unknown"
-            event_type = "Unknown"
-            if 'location' in event:
-                location_name = event['location'].get('name', 'Unknown')
-            if 'event_type' in event:
-                event_type = event['event_type'].get('name', 'Unknown')
-            print(f"ID: {event.get('id')}")
-            print(f"Location: {location_name} (ID: {event.get('location_id', 'MISSING')})")
-            print(f"Type: {event_type}")
-            print(f"Time: {event.get('date_begin')}")
-            print(f"Participants: {event.get('current_participants_count', 0)}/{event.get('max_participants', '?')}")
-            print("---")
-
-        return events
+        return data.get('data', [])
     except requests.exceptions.HTTPError as e:
-        print(f"\n❌ HTTP Error: {e}")
-        print(f"Response: {e.response.text if hasattr(e, 'response') else 'No response text'}")
+        print(f"❌ HTTP Error: {e}")
         return []
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"❌ Error: {e}")
         return []
 
-def find_target_event(events):
-    print(f"\n=== Target Event Search ===")
-    print(f"Looking for: {TARGET_LOCATION_KEYWORD.upper()} {TARGET_CLASS_KEYWORD.upper()}")
-    print(f"Target time: {TARGET_TIME_HOUR:02d}:{TARGET_TIME_MINUTE:02d}")
 
+def find_target_event(events, location_keyword, class_keyword, target_hour, target_minute):
+    """Find an event matching the specified criteria."""
     for event in events:
         try:
             # Parse the UTC time and convert to Berlin time
@@ -162,128 +149,163 @@ def find_target_event(events):
             if 'location' in event:
                 location_name = event['location'].get('name', 'Unknown')
 
-            print(f"\nChecking event:")
-            print(f"ID: {event.get('id')}")
-            print(f"Location: {location_name}")
-            print(f"Berlin Time: {berlin_time.strftime('%H:%M')}")
-            print(f"Participants: {event.get('current_participants_count', 0)}/{event.get('max_participants', '?')}")
-
             # Check if location name contains both location keyword and class keyword
-            # e.g., "Sendling RIDE" contains "sendling" and "ride"
             location_name_lower = location_name.lower()
-            location_matches = TARGET_LOCATION_KEYWORD.lower() in location_name_lower
-            class_matches = TARGET_CLASS_KEYWORD.lower() in location_name_lower
+            location_matches = location_keyword.lower() in location_name_lower
+            class_matches = class_keyword.lower() in location_name_lower
 
             # Check time match
-            time_matches = (berlin_time.hour == TARGET_TIME_HOUR and
-                          berlin_time.minute == TARGET_TIME_MINUTE)
+            time_matches = (berlin_time.hour == target_hour and
+                          berlin_time.minute == target_minute)
 
             if location_matches and class_matches and time_matches:
-                print(f"✅ Found matching class: {location_name} at {berlin_time.strftime('%H:%M')}!")
-                return event["id"]
+                return event["id"], location_name, berlin_time.strftime('%H:%M')
 
         except Exception as e:
-            print(f"Error processing event: {e}")
             continue
 
-    print("❌ No matching event found")
-    return None
+    return None, None, None
 
-def book_event(event_id):
+
+def book_event(event_id, user_id, headers):
+    """Book an event for the specified user."""
     payload = {
-        "user_id": USER_ID,
+        "user_id": user_id,
         "event_id": event_id
     }
 
-    print("\n=== Booking Request ===")
-    print(f"Event ID: {event_id}")
-    print(f"Payload: {payload}")
-    
     try:
-        response = requests.post(BOOKING_API_URL, headers=HEADERS, json=payload)
+        response = requests.post(BOOKING_API_URL, headers=headers, json=payload)
         response.raise_for_status()
-        booking_data = response.json()
-        print("\n=== Booking Response ===")
-        print(f"Booking successful! Response: {booking_data}")
-        return booking_data
+        return response.json()
     except requests.exceptions.HTTPError as e:
-        print(f"\n❌ Booking Error: {e}")
-        print(f"Response: {e.response.text if hasattr(e, 'response') else 'No response text'}")
-        raise
-    except Exception as e:
-        print(f"\n❌ Error during booking: {e}")
-        raise
+        error_text = e.response.text if hasattr(e, 'response') else 'No response text'
+        raise Exception(f"Booking failed: {error_text}")
 
-def run_booking_process():
-    print(f"\n=== Starting booking process at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    print(f"Target: Spinning at Sendling, {TARGET_TIME_HOUR:02d}:{TARGET_TIME_MINUTE:02d}")
-    print(f"Days: Monday, Wednesday, Friday")
-    print(f"Booking {DAYS_IN_ADVANCE} days in advance")
 
-    target_dates = get_target_dates()
+def run_booking_for_user(user):
+    """Run the booking process for a single user."""
+    user_name = user.get('name', 'Unknown')
+    bearer_token = user.get('bearer_token')
+    user_id = user.get('user_id')
+    bookings_config = user.get('bookings', [])
 
-    if not target_dates:
-        print("❌ No target dates found in the next 2 weeks")
-        return
+    print(f"\n{'='*60}")
+    print(f"👤 Processing user: {user_name}")
+    print(f"{'='*60}")
 
-    bookings_made = []
-    bookings_failed = []
+    if not bearer_token or not user_id:
+        print(f"❌ Missing bearer_token or user_id for {user_name}")
+        return []
 
-    for start, end, target_date in target_dates:
-        day_name = target_date.strftime('%A')
-        print(f"\n{'='*50}")
-        print(f"Processing {day_name}, {target_date}")
-        print(f"{'='*50}")
+    headers = get_headers(bearer_token)
+    results = []
 
-        try:
-            events = fetch_events(start, end)
-            event_id = find_target_event(events)
+    for booking in bookings_config:
+        location = booking.get('location', 'sendling')
+        class_type = booking.get('class_type', 'ride')
+        time_str = booking.get('time', '07:35')
+        days = booking.get('days', ['monday', 'wednesday', 'friday'])
+        days_in_advance = booking.get('days_in_advance', 14)
+
+        target_hour, target_minute = parse_time(time_str)
+        target_days = parse_days(days)
+
+        print(f"\n📋 Booking config: {location.upper()} {class_type.upper()} at {time_str}")
+        print(f"   Days: {', '.join(days)}, {days_in_advance} days in advance")
+
+        target_dates = get_target_dates(target_days, days_in_advance, target_hour, target_minute)
+
+        for start, end, target_date in target_dates:
+            day_name = target_date.strftime('%A')
+            print(f"\n   📅 {day_name}, {target_date}")
+
+            events = fetch_events(start, end, headers)
+            event_id, location_name, event_time = find_target_event(
+                events, location, class_type, target_hour, target_minute
+            )
 
             if event_id:
-                booking = book_event(event_id)
-                success_info = {
-                    'date': target_date,
-                    'day': day_name,
-                    'event_id': event_id
-                }
-                bookings_made.append(success_info)
-                print(f"✅ Successfully booked {day_name}, {target_date}!")
+                try:
+                    book_event(event_id, user_id, headers)
+                    print(f"   ✅ Booked: {location_name} at {event_time}")
+                    results.append({
+                        'user': user_name,
+                        'date': str(target_date),
+                        'day': day_name,
+                        'class': f"{location_name} at {event_time}",
+                        'status': 'success'
+                    })
+                except Exception as e:
+                    print(f"   ❌ Failed to book: {e}")
+                    results.append({
+                        'user': user_name,
+                        'date': str(target_date),
+                        'day': day_name,
+                        'class': f"{location} {class_type} at {time_str}",
+                        'status': 'failed',
+                        'error': str(e)
+                    })
             else:
-                bookings_failed.append({
-                    'date': target_date,
+                print(f"   ❌ No matching class found")
+                results.append({
+                    'user': user_name,
+                    'date': str(target_date),
                     'day': day_name,
-                    'reason': 'No matching event found'
+                    'class': f"{location} {class_type} at {time_str}",
+                    'status': 'not_found'
                 })
-                print(f"❌ No matching event found for {day_name}, {target_date}")
 
-        except Exception as e:
-            bookings_failed.append({
-                'date': target_date,
-                'day': day_name,
-                'reason': str(e)
-            })
-            print(f"❌ Error booking {day_name}, {target_date}: {e}")
+    return results
 
-    # Send summary email
-    summary = f"Beat81 Booking Summary\n\n"
-    summary += f"Target: Spinning at Sendling, {TARGET_TIME_HOUR:02d}:{TARGET_TIME_MINUTE:02d}\n\n"
 
-    if bookings_made:
-        summary += "✅ Successfully Booked:\n"
-        for b in bookings_made:
-            summary += f"  - {b['day']}, {b['date']}\n"
+def run_booking_process():
+    """Main booking process for all users."""
+    print(f"\n{'='*60}")
+    print(f"🏋️ Beat81 Auto-Booking Bot")
+    print(f"⏰ Started at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}")
 
-    if bookings_failed:
-        summary += "\n❌ Failed to Book:\n"
-        for b in bookings_failed:
-            summary += f"  - {b['day']}, {b['date']}: {b['reason']}\n"
+    users = load_users()
 
-    print(f"\n{'='*50}")
-    print(summary)
+    if not users:
+        print("❌ No users configured. Please set up users.json or environment variables.")
+        return
 
-    is_success = len(bookings_made) > 0
-    subject = "Beat81 Booking " + ("Success" if is_success else "Failed")
-    send_email(subject, summary, is_success=is_success)
+    print(f"\n👥 Found {len(users)} user(s) to process")
+
+    all_results = []
+    for user in users:
+        results = run_booking_for_user(user)
+        all_results.extend(results)
+
+    # Print summary
+    print(f"\n{'='*60}")
+    print("📊 BOOKING SUMMARY")
+    print(f"{'='*60}")
+
+    successful = [r for r in all_results if r['status'] == 'success']
+    failed = [r for r in all_results if r['status'] == 'failed']
+    not_found = [r for r in all_results if r['status'] == 'not_found']
+
+    if successful:
+        print(f"\n✅ Successfully booked ({len(successful)}):")
+        for r in successful:
+            print(f"   - {r['user']}: {r['day']} {r['date']} - {r['class']}")
+
+    if failed:
+        print(f"\n❌ Failed to book ({len(failed)}):")
+        for r in failed:
+            print(f"   - {r['user']}: {r['day']} {r['date']} - {r.get('error', 'Unknown error')}")
+
+    if not_found:
+        print(f"\n⚠️ Class not found ({len(not_found)}):")
+        for r in not_found:
+            print(f"   - {r['user']}: {r['day']} {r['date']} - {r['class']}")
+
+    print(f"\n{'='*60}")
+    print(f"✅ Completed at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":

@@ -26,7 +26,9 @@ jobs:
 
       - name: Run booking bot
         env:
+          # Option 1: Multi-user config (JSON array of users)
+          USERS_CONFIG: ${{ secrets.USERS_CONFIG }}
+          # Option 2: Single user fallback (backwards compatible)
           BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
           USER_ID: ${{ secrets.USER_ID }}
-          LOCATION_ID_SENDLING: ${{ secrets.LOCATION_ID_SENDLING }}
         run: python beat_81_bot.py

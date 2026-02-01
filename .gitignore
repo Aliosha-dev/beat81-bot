@@ -1,6 +1,9 @@
 # Environment variables (contains secrets)
 .env
 
+# User configuration (contains bearer tokens)
+users.json
+
 # macOS
 .DS_Store
 

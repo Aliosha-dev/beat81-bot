@@ -1,0 +1,37 @@
+[
+  {
+    "name": "Aliosha",
+    "bearer_token": "YOUR_BEARER_TOKEN_HERE",
+    "user_id": "a8927521-568e-43a7-ba33-d18b6596964e",
+    "bookings": [
+      {
+        "location": "sendling",
+        "class_type": "ride",
+        "time": "07:35",
+        "days": ["monday", "wednesday", "friday"],
+        "days_in_advance": 14
+      }
+    ]
+  },
+  {
+    "name": "Person 2",
+    "bearer_token": "THEIR_BEARER_TOKEN_HERE",
+    "user_id": "their-user-id-here",
+    "bookings": [
+      {
+        "location": "schwabing",
+        "class_type": "ride",
+        "time": "18:00",
+        "days": ["tuesday", "thursday"],
+        "days_in_advance": 14
+      },
+      {
+        "location": "hackerbrücke",
+        "class_type": "hiit",
+        "time": "19:30",
+        "days": ["monday", "wednesday"],
+        "days_in_advance": 14
+      }
+    ]
+  }
+]
