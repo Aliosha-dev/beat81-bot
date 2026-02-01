@@ -1,0 +1,32 @@
+name: Book Beat81 Classes
+
+on:
+  schedule:
+    # Run daily at 6:00 AM UTC (7:00 AM Berlin time in winter, 8:00 AM in summer)
+    - cron: '0 6 * * *'
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run booking bot
+        env:
+          BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
+          USER_ID: ${{ secrets.USER_ID }}
+          LOCATION_ID_SENDLING: ${{ secrets.LOCATION_ID_SENDLING }}
+        run: python beat_81_bot.py
