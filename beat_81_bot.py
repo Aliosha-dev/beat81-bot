@@ -1,3 +1,4 @@
+import argparse
 import requests
 import datetime
 import pytz
@@ -9,8 +10,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # === API CONFIGURATION ===
-BOOKING_API_URL = "https://api.gritspot.com/api/tickets"
-EVENTS_API_URL = "https://api.gritspot.com/api/events"
+API_BASE = "https://api.production.b81.io/api"
+BOOKING_API_URL = f"{API_BASE}/tickets"
+EVENTS_API_URL = f"{API_BASE}/events"
+TICKETS_API_URL = f"{API_BASE}/tickets"
+
+DRY_RUN = False
 
 # === USERS CONFIGURATION ===
 # Load users from JSON file or environment variable
@@ -109,18 +114,15 @@ def fetch_events(start, end, headers):
     """Fetch events from the API for the given time range."""
     params = {
         "$sort[date_begin]": 1,
+        "$sort[coach_id]": 1,
         "date_begin_gte": start,
         "date_begin_lte": end,
-        "status_ne[]": ["completed", "cancelled"],
+        "status_ne": "cancelled",
         "is_published": "true",
-        "hide_created_by_mistake": "true",
         "include[]": ["withLocations", "withEventTypes"],
-        "$select[]": ["id", "special", "date_begin", "special_event_name", "special_event_description",
-                      "duration", "max_participants", "coach_id", "current_participants_count",
-                      "participants_count", "language", "location_id"],
         "location_city_code": "munich",
         "$skip": 0,
-        "$limit": 50
+        "$limit": 50,
     }
 
     try:
@@ -169,6 +171,9 @@ def find_target_event(events, location_keyword, class_keyword, target_hour, targ
 
 def book_event(event_id, user_id, headers):
     """Book an event for the specified user."""
+    if DRY_RUN:
+        return {"dry_run": True, "event_id": event_id, "user_id": user_id}
+
     payload = {
         "user_id": user_id,
         "event_id": event_id
@@ -181,6 +186,26 @@ def book_event(event_id, user_id, headers):
     except requests.exceptions.HTTPError as e:
         error_text = e.response.text if hasattr(e, 'response') else 'No response text'
         raise Exception(f"Booking failed: {error_text}")
+
+
+def fetch_existing_tickets(user_id, headers):
+    """Fetch the user's existing (non-cancelled) future tickets. Returns a set of event_ids."""
+    now_berlin = datetime.datetime.now(pytz.timezone("Europe/Berlin")).isoformat()
+    params = {
+        "user_id": user_id,
+        "status_ne": "cancelled",
+        "event_date_begin_gte": now_berlin,
+        "$limit": 200,
+    }
+    try:
+        response = requests.get(TICKETS_API_URL, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+        tickets = data.get('data', data) if isinstance(data, dict) else data
+        return {t.get('event_id') for t in tickets if t.get('event_id')}
+    except Exception as e:
+        print(f"   ⚠️ Could not fetch existing tickets: {e}")
+        return set()
 
 
 def run_booking_for_user(user):
@@ -199,6 +224,9 @@ def run_booking_for_user(user):
         return []
 
     headers = get_headers(bearer_token)
+    existing_event_ids = fetch_existing_tickets(user_id, headers)
+    if existing_event_ids:
+        print(f"   ℹ️ User already has {len(existing_event_ids)} upcoming ticket(s)")
     results = []
 
     for booking in bookings_config:
@@ -225,10 +253,21 @@ def run_booking_for_user(user):
                 events, location, class_type, target_hour, target_minute
             )
 
+            if event_id and event_id in existing_event_ids:
+                print(f"   ⏭️ Already booked: {location_name} at {event_time}")
+                results.append({
+                    'user': user_name,
+                    'date': str(target_date),
+                    'day': day_name,
+                    'class': f"{location_name} at {event_time}",
+                    'status': 'already_booked',
+                })
+                continue
+
             if event_id:
                 try:
                     book_event(event_id, user_id, headers)
-                    print(f"   ✅ Booked: {location_name} at {event_time}")
+                    print(f"   {'🧪 DRY-RUN would book' if DRY_RUN else '✅ Booked'}: {location_name} at {event_time}")
                     results.append({
                         'user': user_name,
                         'date': str(target_date),
@@ -309,4 +348,8 @@ def run_booking_process():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Beat81 Auto-Booking Bot")
+    parser.add_argument("--dry-run", action="store_true", help="Find classes but do not book")
+    args = parser.parse_args()
+    DRY_RUN = args.dry_run
     run_booking_process()
