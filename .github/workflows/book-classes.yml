@@ -4,7 +4,17 @@ on:
   schedule:
     # Run daily at 6:00 AM UTC (7:00 AM Berlin time in winter, 8:00 AM in summer)
     - cron: '0 6 * * *'
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Run mode'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - dry-run
+          - test-invite
 
 jobs:
   book:
@@ -34,4 +44,9 @@ jobs:
           # Gmail SMTP credentials used to send calendar invites
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        run: python beat_81_bot.py
+        run: |
+          case "${{ inputs.mode || 'normal' }}" in
+            dry-run)     python beat_81_bot.py --dry-run ;;
+            test-invite) python beat_81_bot.py --test-invite ;;
+            *)           python beat_81_bot.py ;;
+          esac
