@@ -4,6 +4,11 @@ import datetime
 import pytz
 import json
 import os
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -161,12 +166,111 @@ def find_target_event(events, location_keyword, class_keyword, target_hour, targ
                           berlin_time.minute == target_minute)
 
             if location_matches and class_matches and time_matches:
-                return event["id"], location_name, berlin_time.strftime('%H:%M')
+                return event["id"], location_name, berlin_time.strftime('%H:%M'), event
 
         except Exception as e:
             continue
 
-    return None, None, None
+    return None, None, None, None
+
+
+# === CALENDAR INVITE ===
+
+SMTP_SENDER = os.getenv('EMAIL_RECIPIENT')  # Reused as the Gmail sender address
+SMTP_PASSWORD = os.getenv('EMAIL_PASSWORD')  # Gmail app password
+
+
+def build_ics(event, location_name, attendee_email, attendee_name):
+    """Build an ICS REQUEST body for a Beat81 class."""
+    utc_start = datetime.datetime.fromisoformat(event["date_begin"].replace("Z", "+00:00"))
+    utc_start = utc_start.astimezone(pytz.UTC)
+    duration_minutes = int(event.get("duration") or 50)
+    utc_end = utc_start + datetime.timedelta(minutes=duration_minutes)
+
+    def fmt(dt):
+        return dt.strftime("%Y%m%dT%H%M%SZ")
+
+    dtstamp = fmt(datetime.datetime.now(pytz.UTC))
+    uid = f"beat81-{event['id']}@b81-bot"
+    summary = f"Beat81 — {location_name}"
+    description = (
+        f"Auto-booked Beat81 class.\\n"
+        f"Class: {location_name}\\n"
+        f"Event ID: {event['id']}"
+    )
+
+    return (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "PRODID:-//beat81-bot//EN\r\n"
+        "METHOD:REQUEST\r\n"
+        "CALSCALE:GREGORIAN\r\n"
+        "BEGIN:VEVENT\r\n"
+        f"UID:{uid}\r\n"
+        f"DTSTAMP:{dtstamp}\r\n"
+        f"DTSTART:{fmt(utc_start)}\r\n"
+        f"DTEND:{fmt(utc_end)}\r\n"
+        f"SUMMARY:{summary}\r\n"
+        f"DESCRIPTION:{description}\r\n"
+        f"LOCATION:{location_name}\r\n"
+        f"ORGANIZER;CN=Beat81 Bot:mailto:{SMTP_SENDER}\r\n"
+        f"ATTENDEE;CN={attendee_name};RSVP=TRUE;PARTSTAT=ACCEPTED;ROLE=REQ-PARTICIPANT:mailto:{attendee_email}\r\n"
+        "STATUS:CONFIRMED\r\n"
+        "SEQUENCE:0\r\n"
+        "TRANSP:OPAQUE\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+
+
+def send_calendar_invite(event, location_name, attendee_email, attendee_name):
+    """Send a calendar invite (ICS REQUEST) for a successfully booked class."""
+    if not SMTP_SENDER or not SMTP_PASSWORD:
+        print(f"   ⚠️ EMAIL_RECIPIENT/EMAIL_PASSWORD not set — skipping invite")
+        return False
+    if not attendee_email:
+        print(f"   ⚠️ No invite_email configured for {attendee_name} — skipping invite")
+        return False
+    if DRY_RUN:
+        print(f"   🧪 DRY-RUN would send invite to {attendee_email}")
+        return True
+
+    try:
+        ics = build_ics(event, location_name, attendee_email, attendee_name)
+        utc_start = datetime.datetime.fromisoformat(event["date_begin"].replace("Z", "+00:00"))
+        berlin_start = utc_start.astimezone(pytz.timezone("Europe/Berlin"))
+
+        msg = MIMEMultipart("mixed")
+        msg["From"] = SMTP_SENDER
+        msg["To"] = attendee_email
+        msg["Subject"] = f"Beat81: {location_name} — {berlin_start.strftime('%a %d %b, %H:%M')}"
+
+        body_text = (
+            f"Auto-booked by beat81-bot.\n\n"
+            f"Class: {location_name}\n"
+            f"When: {berlin_start.strftime('%A %d %B %Y, %H:%M')} (Berlin)\n"
+        )
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(body_text, "plain"))
+        alt.attach(MIMEText(ics, "calendar; method=REQUEST; charset=UTF-8"))
+        msg.attach(alt)
+
+        ics_attach = MIMEBase("text", "calendar", method="REQUEST", name="invite.ics")
+        ics_attach.set_payload(ics.encode("utf-8"))
+        encoders.encode_base64(ics_attach)
+        ics_attach.add_header("Content-Disposition", "attachment; filename=invite.ics")
+        msg.attach(ics_attach)
+
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(SMTP_SENDER, SMTP_PASSWORD)
+            server.sendmail(SMTP_SENDER, [attendee_email], msg.as_string())
+
+        print(f"   📅 Calendar invite sent to {attendee_email}")
+        return True
+    except Exception as e:
+        print(f"   ⚠️ Failed to send calendar invite: {e}")
+        return False
 
 
 def book_event(event_id, user_id, headers):
@@ -213,6 +317,7 @@ def run_booking_for_user(user):
     user_name = user.get('name', 'Unknown')
     bearer_token = user.get('bearer_token')
     user_id = user.get('user_id')
+    invite_email = user.get('invite_email')
     bookings_config = user.get('bookings', [])
 
     print(f"\n{'='*60}")
@@ -249,7 +354,7 @@ def run_booking_for_user(user):
             print(f"\n   📅 {day_name}, {target_date}")
 
             events = fetch_events(start, end, headers)
-            event_id, location_name, event_time = find_target_event(
+            event_id, location_name, event_time, event = find_target_event(
                 events, location, class_type, target_hour, target_minute
             )
 
@@ -268,6 +373,7 @@ def run_booking_for_user(user):
                 try:
                     book_event(event_id, user_id, headers)
                     print(f"   {'🧪 DRY-RUN would book' if DRY_RUN else '✅ Booked'}: {location_name} at {event_time}")
+                    send_calendar_invite(event, location_name, invite_email, user_name)
                     results.append({
                         'user': user_name,
                         'date': str(target_date),
@@ -347,9 +453,49 @@ def run_booking_process():
     print(f"{'='*60}")
 
 
+def run_test_invite():
+    """Send one calendar invite per configured user using the next matching event,
+    without booking anything. For verifying SMTP/ICS plumbing."""
+    print("🧪 TEST-INVITE mode: sending one invite per user, no bookings\n")
+    users = load_users()
+    for user in users:
+        user_name = user.get('name', 'Unknown')
+        bearer_token = user.get('bearer_token')
+        user_id = user.get('user_id')
+        invite_email = user.get('invite_email')
+        bookings_config = user.get('bookings', [])
+        if not (bearer_token and user_id and invite_email and bookings_config):
+            print(f"❌ Skipping {user_name}: missing config")
+            continue
+        headers = get_headers(bearer_token)
+        b = bookings_config[0]
+        target_hour, target_minute = parse_time(b.get('time', '07:35'))
+        target_days = parse_days(b.get('days', ['monday', 'wednesday', 'friday']))
+        target_dates = get_target_dates(target_days, b.get('days_in_advance', 14), target_hour, target_minute)
+        sent = False
+        for start, end, target_date in target_dates:
+            events = fetch_events(start, end, headers)
+            event_id, location_name, event_time, event = find_target_event(
+                events, b.get('location', 'sendling'), b.get('class_type', 'ride'),
+                target_hour, target_minute,
+            )
+            if event:
+                print(f"👤 {user_name}: sending test invite for {location_name} on {target_date}")
+                send_calendar_invite(event, location_name, invite_email, user_name)
+                sent = True
+                break
+        if not sent:
+            print(f"❌ {user_name}: no matching event found in target window")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Beat81 Auto-Booking Bot")
     parser.add_argument("--dry-run", action="store_true", help="Find classes but do not book")
+    parser.add_argument("--test-invite", action="store_true",
+                        help="Send one calendar invite per user without booking (smoke test)")
     args = parser.parse_args()
     DRY_RUN = args.dry_run
-    run_booking_process()
+    if args.test_invite:
+        run_test_invite()
+    else:
+        run_booking_process()
