@@ -3,6 +3,7 @@
     "name": "Aliosha",
     "bearer_token": "YOUR_BEARER_TOKEN_HERE",
     "user_id": "a8927521-568e-43a7-ba33-d18b6596964e",
+    "invite_email": "you@example.com",
     "bookings": [
       {
         "location": "sendling",
@@ -17,6 +18,7 @@
     "name": "Person 2",
     "bearer_token": "THEIR_BEARER_TOKEN_HERE",
     "user_id": "their-user-id-here",
+    "invite_email": "person2@example.com",
     "bookings": [
       {
         "location": "schwabing",

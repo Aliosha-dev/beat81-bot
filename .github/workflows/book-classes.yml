@@ -31,4 +31,7 @@ jobs:
           # Option 2: Single user fallback (backwards compatible)
           BEARER_TOKEN: ${{ secrets.BEARER_TOKEN }}
           USER_ID: ${{ secrets.USER_ID }}
+          # Gmail SMTP credentials used to send calendar invites
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
         run: python beat_81_bot.py
